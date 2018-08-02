@@ -1,0 +1,151 @@
+---
+title: "Area of logistic prediction output rasters for LR and Maxent"
+author: "Katharine Egan"
+email: "katharineegan34@gmail.com"
+date: "July 2018"
+output: html_document
+---
+
+Script to calculate the area of habitat suitability/probability of occurrence at certain thresholds 
+0 - 0.25 | 0.25 - 0.5 | 0.5 - 0.75 | 0.75 - 1.0
+Output: a table comparing area for each model as a CSV
+
+
+Define variables here: 
+```{r}
+# raster temporary folder file path
+raster_temp_folder <- "E:/SERVIR/Landslide_Models/temp"
+
+# file path to maxent logistic prediction raster 
+maxent_raster <- "E:/SERVIR/Landslide_Models/models/Maxent/output/3_final_maxent_model_output/landslide_logistic_predict.tif"
+
+# file path to LR logistic prediction raster
+LR_raster <- "E:/SERVIR/Landslide_Models/models/LR/output/logistic_prediction.tif"
+
+# file path to write out the suitable habitat table 
+table_path <- "E:/SERVIR/Landslide_Models/area_calculations"
+```
+
+Libraries:
+```{r}
+library(raster)
+library(rgdal)
+library(sp)
+library(tidyverse)
+library(rgeos)
+```
+
+Define raster temporary folder here: 
+```{r}
+# set raster options 
+rasterOptions(tmpdir = raster_temp_folder, progress = "text")
+```
+
+Read in the logistic prediction rasters:
+```{r}
+# read in prediction rasters
+mlr <- raster(LR_raster)
+mx <- raster(maxent_raster)
+```
+
+Calculate area of suitable habitat or probability of landslide occurrences for certain thresholds: (this will take a while to run)
+```{r}
+# 0 to  0.25 
+# reclassify cells first 
+# matrix of values to be reclassified to
+m <- c(0, 0.25, 1, 0.25, 1.00, 0)
+rclmat <- matrix(m, ncol=3, byrow=TRUE)
+
+# reclassify the raster 
+mlr1_reclass <- reclassify(mlr, rclmat)
+mx1_reclass <- reclassify(mx, rclmat)
+
+# sum number of pixels above 0
+# multiply by the square of the resolution to get the area
+mlr1_km <- (sum(mlr1_reclass[] > 0, na.rm = T) * res(mlr1_reclass)[1]^2) / 1000 
+mx1_lm <- (sum(mx1_reclass[] > 0, na.rm = T) * res(mx1_reclass)[1]^2) / 1000
+
+# get the percentage of cells
+# number of cells above 0, divded by the total number of cells in the entire raster multipled by 100
+mlr1_pc <- (sum(mlr1_reclass[] > 0, na.rm = T) / 238627168) * 100
+mx1_pc <- (sum(mx1_reclass[] > 0, na.rm = T) / 238627168) * 100
+
+# 0.25 to 0.5 
+# reclassify cells first 
+# matrix of values to be reclassified to
+m <- c(0, 0.25, 0, 0.25, 0.5, 1, 0.5, 1.0, 0)
+rclmat <- matrix(m, ncol=3, byrow=TRUE)
+
+# reclassify the raster 
+mlr2_reclass <- reclassify(mlr, rclmat)
+mx2_reclass <- reclassify(mx, rclmat)
+
+# sum number of pixels above 0
+# multiply by the square of the resolution to get the area
+mlr2_km <- (sum(mlr2_reclass[] > 0, na.rm = T) * res(mlr2_reclass)[1]^2) / 1000 
+mx2_km <- (sum(mx2_reclass[] > 0, na.rm = T) * res(mx2_reclass)[1]^2) / 1000
+
+# get the percentage of cells
+# number of cells above 0, divded by the total number of cells in the entire raster multipled by 100
+mlr2_pc <- (sum(mlr2_reclass[] > 0, na.rm = T) / 238627168) * 100
+mx2_pc <- (sum(mx2_reclass[] > 0, na.rm = T) / 238627168) * 100
+
+
+# 0.5 to 0.75 
+# reclassify cells first 
+# matrix of values to be reclassified to
+m <- c(0, 0.5, 0, 0.5, 0.75, 1, 0.75, 1.0, 0)
+rclmat <- matrix(m, ncol=3, byrow=TRUE)
+rclmat
+
+# reclassify the raster 
+mlr3_reclass <- reclassify(mlr, rclmat)
+mx3_reclass <- reclassify(mx, rclmat)
+
+# sum number of pixels above 0
+# multiply by the square of the resolution to get the area
+mlr3_km <- (sum(mlr3_reclass[] > 0, na.rm = T) * res(mlr3_reclass)[1]^2) / 1000 
+mx3_km <- (sum(mx3_reclass[] > 0, na.rm = T) * res(mx3_reclass)[1]^2) / 1000
+
+# get the percentage of cells
+# number of cells above 0, divded by the total number of cells in the entire raster multipled by 100
+mlr3_pc <- (sum(mlr3_reclass[] > 0, na.rm = T) / 238627168) * 100
+mx3_pc <- (sum(mx3_reclass[] > 0, na.rm = T) / 238627168) * 100
+
+# 0.75 to 1.00
+m <- c(0, 0.75, 0, 0.75, 1.0, 1)
+rclmat <- matrix(m, ncol=3, byrow=TRUE)
+rclmat
+
+# reclassify the raster 
+mlr4_reclass <- reclassify(mlr, rclmat)
+mx4_reclass <- reclassify(mx, rclmat)
+
+# sum number of pixels above 0
+# multiply by the square of the resolution to get the area
+mlr4_km <- (sum(mlr4_reclass[] > 0, na.rm = T) * res(mlr4_reclass)[1]^2) / 1000 
+mx4_km <- (sum(mx4_reclass[] > 0, na.rm = T) * res(mx4_reclass)[1]^2) / 1000
+
+# get the percentage of cells
+# number of cells above 0, divded by the total number of cells in the entire raster multipled by 100
+mlr4_pc <- (sum(mlr4_reclass[] > 0, na.rm = T) / 238627168) * 100
+mx4_pc <- (sum(mx4_reclass[] > 0, na.rm = T) / 238627168) * 100
+```
+
+Create a data frame with the suitable habitat km2 and % of suitable habitat and write out
+```{r}
+# make tibble
+area_table <- tibble(
+  thresholds = c("0 - 0.25", "0.25 - 0.5", "0.5 - 0.75", "0.75 - 1.0"),
+  susceptibility = c("low", "medium", "high", "very high"),
+  LR_percent = c(mlr1_pc, mlr2_pc, mlr3_pc, mlr4_pc),
+  LR_km = c(mlr1_km, mlr2_km, mlr3_km, mlr4_km),
+  Maxent_percent = c(mx1_pc, mx2_pc, mx3_pc, mx4_pc),
+  Maxent_km = c(mx1_lm, mx2_km, mx3_km, mx4_km)
+) %>% 
+  mutate(LR_percent = round(LR_percent, 2),
+         Maxent_percent = round(Maxent_percent, 2))
+
+# write out csv
+write_csv(area_table, paste(table_path, "/area_table.csv", sep = ""))
+```

@@ -1,0 +1,148 @@
+---
+title: "Final Maxent Model"
+author: "Katharine Egan"
+email: "katharineegan34@gmail.com"
+date: "July 2018"
+output: html_document
+---
+
+-Read in the predictors that compose the best model according to Script #2
+-Stack predictors
+-Read in presence data and background points from Script #1 
+-Extract p/bg points from raster stack
+-Using “dismo” package to run Maxent model in R
+-Downloads a maxent.jar file from Maxent github and moves it to the dismo R package folder
+-Dismo accesses Maxent and allows you to manipulate the settings in R
+-Run model - USES THE FULL DATASET (no training/testing, get that data from Script #2)
+-Only 1 model run (no replicates) for this script, but can specify replicates
+-Use model to predict over the raster stack using raster::predict()
+Makes logistic prediction raster - writes out a geotiff
+
+Define variables here: 
+```{r}
+# define your raster temporary folder; this is where the script will store temporary raster files while raster things are happening
+raster_temp_folder <- "E:/SERVIR/Landslide_Models/temp"
+
+# read in the background points and the presence data 
+p_path <- "E:/SERVIR/Landslide_Models/models/Maxent/points/occurrences.csv"
+bg_path <- "E:/SERVIR/Landslide_Models/models/Maxent/points/backgroundpoints.csv" 
+
+# path where all the data will be written out 
+output <- "E:/SERVIR/Landslide_Models/models/Maxent/output/3_final_maxent_model_output"
+
+# specify categorical data here 
+# must be the same name 
+categorical <- c("land_cover_tmp")
+```
+
+Libraries:
+```{r}
+library(raster)
+library(rgeos)
+library(rgdal)
+library(sp)
+library(dismo)
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(MaxentVariableSelection)
+library(beepr)
+```
+
+Define raster temporary folder here: 
+```{r}
+# set raster options 
+rasterOptions(tmpdir = raster_temp_folder, progress = "text")
+```
+
+Stacking rasters for the model:
+```{r}
+# define the rasters that compose of the best model 
+var1_path <- "E:/SERVIR/Landslide_Models/predictors_ascii/land_cover_tmp.asc"
+var2_path <- "E:/SERVIR/Landslide_Models/predictors_ascii/dem_tmp.asc"
+var3_path <- "E:/SERVIR/Landslide_Models/predictors_ascii/slope_tmp.asc"
+
+# define as rasters
+land_cover <- raster(var1_path)
+dem <- raster(var2_path)
+slope <- raster(var3_path)
+# .... add more here depending on model
+
+# stack rasters 
+rs <- stack(land_cover, dem, slope)
+#....add more variable names here depending on model
+
+# set projection for the raster stack 
+crs(rs) <- "+proj=utm +zone=47 +datum=WGS84 +units=m +no_defs +ellps=WGS84 +towgs84=0,0,0"
+```
+
+Combine presence and background point data and subset out environmental data: 
+```{r}
+# read in the presence and absence data
+p <- read_csv(p_path)
+bg <- read_csv(bg_path)
+
+# combine p and a
+p_bg <- bind_rows(p, bg) %>%
+  mutate(species = if_else(species == "landslide", 1, 0)) %>% 
+  dplyr::rename(Group = species, 
+                Longitude = longitude, 
+                Latitude = latitude)
+
+# subset out env data
+env <- p_bg %>% 
+  select(-c(Group, Longitude, Latitude))
+
+# keep only landslide, longitude, and latitude in the pg file 
+p_bg <- p_bg %>% 
+  select(Group)
+p_bg <- p_bg$Group
+```
+
+Run Maxent model: 
+```{r}
+# FIRST make sure you have rJava installed - if you are working on 64bit verison of R, you MUST have 64bit Java installed
+
+# SECOND move your maxent jar file to the DISMO package folder
+if(!file.exists(paste0(system.file("java",
+                                    package="dismo"),"/maxent.jar"))  )   {
+utils::download.file(url="https://raw.githubusercontent.com/mrmaxent/Maxent/master/ArchivedReleases/3.3.3k/maxent.jar",
+                     destfile=paste0(system.file("java",
+                                          package="dismo"),"/maxent.jar"),
+                     mode="wb") ## wb for binary file, otherwise maxent.jar can not execute
+}
+
+# run maxent model with full dataset
+mod <- dismo::maxent(x = env, ## env conditions
+              p = p_bg,   ## 1:presence or 0:absence
+              path = output,
+              factors = categorical,
+              removeDuplicates = TRUE,
+              args = c("responsecurves=true", 
+                       "removeduplicates=true",
+                       "jackknife=true",
+                       "outputformat=logistic",
+                       "betamultiplier=1.0",
+                       "maximumbackground=10000",
+                       "replicates=1",
+                       "replicatetype=subsample",
+                       "writeplotdata=true"))
+              
+# view the maxent model in a html brower
+mod
+```
+
+Predict over a raster stack, the maxent model in R does not write out an logistic ascii file and save to output location:
+```{r}
+# project to study area [raster]
+pred <- predict(mod, rs) # studyArea is the clipped rasters 
+plot(pred)
+
+# save as a raster to the maxent_ouputs folder 
+writeRaster(pred, 
+            paste(output, "/landslide_logistic_predict.tif", sep=""),
+            format = "GTiff")
+
+# make a noise when done
+beep(3)
+```

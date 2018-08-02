@@ -1,0 +1,205 @@
+---
+title: "Data Preparation for Maxent Models"
+author: "Katharine Egan"
+email: "katharineegan34@gmail.com"
+date: "July 2018"
+output: html_document
+---
+
+This script prepares the data for modeling input. 
+
+Steps: 
+1) Read in and stack the predictor data (rasters)
+2) Remove landslide presence points that fall outside of the country shapefile of Myanmar
+3) Extract presence points from the raster stack - each point will have a value from the raster stack associated with it
+4) Randomly select 10,000 background points from the raster stack (these are considered the "absences" in a Maxent model) - after this, each point will already have a value associated with it from the raster stack
+5) Save presence points and background points to CSVs for use in the next script.
+
+Define variables here: 
+```{r}
+# define your raster temporary folder; this is where the script will store temporary raster files while raster things are happening
+raster_temp_folder <- "E:/SERVIR/Landslide_Models/temp"
+
+# define folder where the ascii files are located
+ascii_path <- "E:/SERVIR/Landslide_Models/predictors_ascii"
+
+# path to where the country shapefile is located 
+country_shp_path <- "E:/SERVIR/Landslide_Models/layers"
+
+# define name of the country shapefile 
+country_shp_name <- "temporary_myanmar"
+
+# path to landslide occurrences in a CSV format
+# this file MUST have columns that look like this and in this order:
+# Group, Longitude, Latitude
+landslides_csv <- "E:/SERVIR/Landslide_Models/points/landslide_presences.csv"
+
+# specify the path to save all RData files 
+rdata_path <- "E:/SERVIR/Landslide_Models/models/Maxent/rdata_files"
+
+# path to save background points and presence points as CSVs
+points_path <- "E:/SERVIR/Landslide_Models/models/Maxent/points"
+
+# vector of column names
+# these MUST be the same exact names as the predictor ascii files 
+column_names <- c("dem_tmp", "slope_tmp", "land_cover_tmp")
+```
+
+Libraries:
+```{r}
+library(raster)
+library(rgeos)
+library(rgdal)
+library(sp)
+library(dismo)
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(MaxentVariableSelection)
+library(beepr)
+```
+
+Define raster temporary folder here: 
+```{r}
+# set raster options 
+rasterOptions(tmpdir = raster_temp_folder, progress = "text")
+```
+
+Step 1) Read in the predictors, landslide occurrences, and the country shapefile
+```{r}
+# read in the raster data 
+raster_list <- list.files(path=ascii_path, 
+     pattern =".asc$", full.names=TRUE)
+
+# stack the rasters
+rs <- stack(raster_list)
+
+# set projection for the raster stack 
+crs(rs) <- "+proj=utm +zone=47 +datum=WGS84 +units=m +no_defs +ellps=WGS84 +towgs84=0,0,0"
+
+# read in model extent for trimming points
+model_fp <- readOGR(dsn = country_shp_path, layer = country_shp_name)
+
+# read in the occurrence data 
+landslides <- read_csv(landslides_csv)
+```
+
+Step 2) This chunk of code removes data points that fall outside of the country shapefile and also removes any duplicate coordinates
+```{r}
+# make a copy of the occurrence data
+landslides_sp <- landslides
+
+# convert to a spatial object
+coordinates(landslides_sp) <- ~Longitude+Latitude
+
+# it MUST have the same projection as the country shapefile and raster stack
+proj4string(landslides_sp) <- "+proj=utm +zone=47 +datum=WGS84 +units=m +no_defs +ellps=WGS84 +towgs84=0,0,0"
+
+# look for points that fall outside country shapefile
+# where there are NAs, those points are inside the model extent
+tmp <- over(landslides_sp, model_fp)
+tmp <- tmp %>% tibble::rownames_to_column() %>% 
+  mutate_if(is.factor, as.numeric)
+
+# combine the original data with the one produced by over()
+landslides_trim <- landslides %>% tibble::rownames_to_column() %>% 
+  full_join(tmp) %>% 
+  filter(!is.na(Id)) %>% 
+  #filter(!is.na(LON))
+  select(Group, Longitude, Latitude)
+
+# convert to a spatial object and check to make sure points are inside the country shapefile
+tmp_sp <- landslides_trim
+coordinates(tmp_sp) <- ~Longitude+Latitude
+proj4string(tmp_sp) <- "+proj=utm +zone=47 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
+
+# create two separate data frames: one for joining and one for extrating from the raster stack 
+ls_join <- landslides_trim %>% distinct() %>% unique %>% 
+  tibble::rownames_to_column(var = "ID")
+landslides_trim <- landslides_trim %>% distinct() %>% unique %>% select(-Group) 
+```
+
+Step 3) Format data for MaxentVariableSelect package; need two separate CSVs for input into the MaxentVariableSelect package: an occurrence one and a background point one
+```{r}
+# extract presence locations from raster stack
+# each presence should be associated with a value from the raster
+landslides_trim_env <- raster::extract(rs, landslides_trim)
+
+# clean up the extracted data frame
+# first three columns must be "species, longitude, latitude"
+# need to join back with the original data
+# HAVE TO REMOVE NAs - won't work with the maxent R package if there are NAs
+landslide_trim_env_clean <- as.data.frame(landslides_trim_env) %>% 
+  tibble::rownames_to_column(var = "ID") %>% 
+  full_join(ls_join) %>% 
+  rename(species = Group,
+         longitude = Longitude,
+         latitude = Latitude) %>% 
+  drop_na()
+
+# specify other columns 
+other <- c("species", "longitude", "latitude")
+
+# add together with the column names 
+t <- c(other, column_names)
+
+# rearrange columns  
+landslide_trim_env_clean <-
+  landslide_trim_env_clean[,dput(as.character(t))]
+```
+
+Step 4) Manually select random background points
+```{r}
+# select background points from a raster object; the number provided in the set.seed() function determines the random sample, using the same number will produce the same random sample		
+
+# use this code before the sampleRandom function every time, if you want to get the same "random samples"
+# select 12,000 background points
+set.seed(1) 
+bg <- sampleRandom(x=rs,
+                   size=10000,
+                   na.rm=T, #removes the 'Not Applicable' points  
+                   sp=T) # return spatial points 
+
+# convert the background points to a dataframe
+# clean this up, add in the original data 
+# first three columns must be "species, longitude, latitude"
+# need to join back with the original data
+# HAVE TO REMOVE NAs - won't work with the maxent R package if there are NAs
+a_clean <- bg@data %>% bind_cols(as.data.frame(bg@coords)) %>% 
+  rename(longitude = x, latitude = y) %>% 
+  drop_na() %>% 
+  mutate(species = "bg") %>% 
+  drop_na()
+
+# specify other columns 
+other <- c("species", "longitude", "latitude")
+
+# add together with the column names 
+d <- c(other, column_names)
+
+# rearrange columns  
+a_clean <- a_clean[,dput(as.character(d))]
+```
+
+Step 5) Save everything:
+```{r}
+# save the entire workspace
+save(list = ls(all.names = TRUE), 
+     file = paste(rdata_path, "/1_data_prep_workspace.RData", sep = ""),
+     envir = .GlobalEnv)
+
+# save raster stack as an rdata file
+save(rs, file = paste(rdata_path, "/raster_stack_of_predictors.RData", 
+                      sep = ""))
+
+# write landslide occurrences to a csv
+write_csv(landslide_trim_env_clean, 
+          paste(points_path, "/occurrences.csv", sep = ""))
+
+# write background points to a csv
+write_csv(a_clean, paste(points_path, "/backgroundpoints.csv", sep = ""))
+
+# play a noise to indicate when the entire script is done running
+beep(3)
+```
+

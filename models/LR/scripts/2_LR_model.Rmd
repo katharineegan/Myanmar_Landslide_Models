@@ -1,0 +1,297 @@
+---
+title: "Logistic regression model"
+author: "Katharine Egan"
+email: "katharineegan34@gmail.com"
+date: "July 2018"
+output: html_document
+---
+
+-Read in the raster stack from the .RData file
+-Read in the "landslide_occurrences_with_env.csv"
+-Split data into training and test data
+-Run GLM (family = binomial(link = "logit")) on variables
+-Test for spatial autocorrelation
+-Promptly ignore whether the residuals are spatially autocorrelated or not
+-Get predicted values
+-AUC test and train values 
+-McFadden's R2
+-Chi-square test on null model vs. full model
+-Confusion matrix + parameters
+-Use model to predict over raster stack 
+
+
+Define variables here: 
+```{r}
+# define your raster temporary folder; this is where the script will store temporary raster files while raster things are happening
+raster_temp_folder <- "E:/SERVIR/Landslide_Models/temp"
+
+# path to the landslide occurrences csv 
+occ_path <- "E:/SERVIR/Landslide_Models/models/LR/points/landslide_occurrences_with_env.csv"
+
+# define path for output folder 
+output_path <- "E:/SERVIR/Landslide_Models/models/LR/output"
+
+# define rdata path
+rdata_path <- "E:/SERVIR/Landslide_Models/models/LR/rdata_files"
+
+# define categorical variable here: 
+# must match name of the raster
+categorical_data <- c("land_cover_tmp")
+```
+
+Libraries you need:
+```{r}
+library(raster)
+library(sp)
+library(dismo)
+library(ROCR) # for ROC curves
+library(rgdal)
+library(tidyverse)
+library(broom) # for cleaning up statistical objects
+library(readxl)
+library(writexl)
+library(pscl)
+library(car)
+library(spdep)
+library(ncf)
+library(caret)
+```
+
+Define raster temporary folder here: 
+```{r}
+# set raster options 
+rasterOptions(tmpdir = raster_temp_folder, progress = "text")
+```
+
+Read in the raster stack for predicting over later on
+```{r}
+load(paste(rdata_path, "/rs.RData", sep = ""))
+```
+
+Separating data into training and test data for the models:
+```{r}
+# read in the occurrence data
+occ <- read_csv(occ_path)
+
+# make sure categorical variables are factors/characters and NOT numeric
+for (i in categorical_data){
+  #print(i)
+  occ[, c(i)] <- as.factor(unlist(occ[, c(i)]))
+  class(unlist(occ[, c(i)]))
+}
+
+# get the same random sample for training and testing
+set.seed(1)
+
+# randomly select 50% for training
+selected <- sample(1:nrow(occ),nrow(occ)*0.5)
+occ_train <- occ[selected,]
+
+# randomly select 50% for testing
+# the presences and absences need to be split up in order to evaluate the model later on
+occ_test <- occ[-selected,]
+occP_test <- occ_test %>% filter(Group == 1)
+occA_test <- occ_test %>% filter(Group == 0)
+rm(occ_test)
+```
+
+Run the model that is the exact same as the Maxent model
+```{r}
+# get only the variables needed from the occ_train data 
+occ_train_env <- occ_train %>%
+  dplyr::select(-c(Longitude, Latitude))
+
+# logistic regression of best model
+best <- glm(Group ~ ., data = occ_train_env, 
+            family = binomial(link = "logit"))
+summary(best) 
+
+# clean up the model results
+best_tidy <- tidy(best) %>% 
+  mutate(coefficients = round(estimate, 8),
+         p.value = round(p.value, 4)) %>% 
+  rename(variable = term,
+         p_value = p.value)
+```
+
+Checking to see if the residuals are spatially autocorrelated:
+
+Resources:
+from Dormann et al. 2007
+http://www.bias-project.org.uk/ASDARcourse/unit6_slides.pdf
+http://rspatial.org/analysis/rst/3-spauto.html
+https://mgimond.github.io/Spatial/spatial-autocorrelation-in-r.html
+```{r}
+# Plotting/calculating spatial autocorrelation
+# this uses the "ncf" package
+# correlog of the model
+# correlog is the function to estimate spatial (cross-)correlograms. Either univariate or multivariate (time seres) for each site can be used.
+correlog1.1 <- correlog(occ_train$Longitude, 
+                        occ_train$Latitude, residuals(best),
+                        na.rm=T, increment=1, resamp=0)
+
+# now plot only the first 20 distance classes:
+par(mar=c(5,5,0.1, 0.1))
+plot(correlog1.1$correlation[1:9000], type="b", pch=16, cex=1.5, lwd=1.5,
+xlab="distance", ylab="Moran's I", cex.lab=2, cex.axis=1.5); abline(h=0)
+
+# make a map of the residuals:
+# convert this mess to ggplot2
+plot(occ_train$Longitude, occ_train$Latitude, 
+     col=c("blue","red")[sign(resid(best))/2+1.5], 
+     pch=19, cex=abs(resid(best))/max(resid(best))*2, 
+     xlab="geographical xcoordinates",
+     ylab="geographical y-coordinates")
+
+# calculate Moran's I values explicitly for a certain distance,
+# and to test for its significance: (using spdep)
+# first, convert coordinates to a matrix
+mat <- as.matrix(occ_train[, c("Longitude", "Latitude")])
+
+# give lower and upper distance class here
+# you can define a max distance until every point has a neighbor
+pa_nb <- dnearneigh(mat, 0, 100000)
+
+#turns neighbourhood object into a weighted list
+pa_nb_weighted <- nb2listw(pa_nb, style = "W")
+
+# this is the Moran's I test: 
+GlobMT1.1 <- moran.test(residuals(best), listw=pa_nb_weighted)
+
+# this is a monte carlo simulation of the Moran's I test, literature says more important
+mc <- moran.mc(residuals(best), pa_nb_weighted, 99)
+mc
+plot(mc)
+
+# NOTE: if your p-value from the moran.test and the moran.mc is NOT significant, then your residuals are NOT spatially autocorrelated
+```
+
+Model performance: 
+
+Resources on use of McFaddens R2
+https://stats.idre.ucla.edu/other/mult-pkg/faq/general/faq-what-are-pseudo-r-squareds/
+```{r}
+# first, get prediction values
+# MAKE SURE THIS IS type = "response" - will give predicted values between 0 and 1
+# summary is meant to check this
+pred <- predict(best, type = "response")
+summary(pred)
+
+# add the predicted values to the original data frame as a column called "predicted values"
+occ_train$predicted_values <- pred
+
+# get AUC value
+prediction <- ROCR::prediction(pred, occ_train[, c("Group")])
+
+# get the AUC performance
+auc_perf <- ROCR::performance(prediction, measure = "auc") 
+  
+# get the yvalues specifically
+train_auc <- unlist(auc_perf@y.values)
+train_auc
+
+# get the mcfaddens value 
+mcfadden <- pscl::pR2(best)
+mcfadden <- mcfadden[4]
+mcfadden
+
+# get the pvalue when comparing the null model with the full model
+chi <- with(best, pchisq(null.deviance - deviance, df.null - df.residual, lower.tail = FALSE)) 
+chi
+anova(best, test = "Chisq")
+
+# evaluate the model with the test data
+eval <- evaluate(occP_test, occA_test, best)
+eval 
+test_auc <- eval@auc # test AUC
+
+# subset out columns for confusion matrix
+# this creates a column called "pred_fact"
+# if predicted values are above 0.5, it's considered a 1
+tmp <- occ_train %>% 
+  dplyr::select(predicted_values, Group) %>% 
+  mutate(pred_fact = if_else(predicted_values > 0.5, 1, 0)) %>% 
+  mutate(Group = as.factor(Group),
+         pred_fact = as.factor(pred_fact))
+
+# get confusion matrix
+conf_matrix <- caret::confusionMatrix(tmp$pred_fact, tmp$Group)
+conf_matrix
+
+# put everything into a data frame 
+model_performance <- tibble(
+  model = c("best"),
+  train_auc = c(train_auc),
+  test_auc = c(test_auc),
+  mcfaddensR2 = c(mcfadden),
+  chi_pvalue = c(chi))
+
+# put confusion matrix into a data frame
+conf_matrix_tidy <- tidy(conf_matrix$table) %>% 
+  tibble::add_column(type = c("True Negative", "False Positive",
+                              "False Negative", "True Positive")) %>% 
+  rename(Actual = Reference)
+
+# get the calculations from the confusion matrix 
+conf_matrix_calcs <- tidy(conf_matrix$byClass) %>% 
+  rename(Value = x)
+```
+
+Get the predicted raster: 
+```{r}
+# subset the land cover data from the raster stack
+land_cover <- rs$land_cover_tmp
+
+# remove from the raster stack (the first one)
+rs <- dropLayer(rs, 1)
+
+# remove factor levels that are not in the model
+land_cover[land_cover == 1] <- NA
+land_cover[land_cover == 3] <- NA
+land_cover[land_cover == 7] <- NA 
+land_cover[land_cover == 9] <- NA 
+
+# add land cover back to the raster stack
+rs_new <- stack(rs, land_cover)
+
+# run prediction over raster stack of best model
+predicted_raster <- raster::predict(rs_new, best, type = "response",
+                                    progress = "text")
+plot(predicted_raster)
+```
+
+Save stuff:
+```{r}
+# write out prediction raster as a geotiff
+writeRaster(predicted_raster, 
+            filename = paste(output_path, "/logistic_prediction.tif", 
+                             sep = ""),
+            format = "GTiff", overwrite = TRUE, progress = "text")
+
+# write out model results and save as CSV 
+write_csv(best_tidy, paste(output_path, "/LR_model_results.csv", sep = ""))
+
+# write out model performance results as a csv 
+write_csv(model_performance, 
+          paste(output_path, "/LR_model_performance.csv", sep = ""))
+
+# write out confusion matrix as a csv 
+write_csv(conf_matrix_tidy,
+          paste(output_path, "/confusion_matrix.csv", sep = ""))
+
+# write out calculations of confusion matrix as a csv
+write_csv(conf_matrix_calcs,
+          paste(output_path, "/confusion_matrix_calculations.csv", 
+                sep = ""))
+
+# write out the final model data frame with the predicted values associated with it
+write_csv(occ_train,
+          paste(output_path, "/training_data_with_predictions.csv", 
+                sep = ""))
+
+# save the entire workspace
+save(list = ls(all.names = TRUE), 
+     file = paste(rdata_path, "/2_LR_model_workspace.RData", sep = ""),
+     envir = .GlobalEnv)
+```
+

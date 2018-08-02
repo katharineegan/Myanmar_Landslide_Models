@@ -1,0 +1,123 @@
+---
+title: "Data preparation for logistic regression models"
+author: "Katharine Egan"
+email: "katharineegan34@gmail.com"
+date: "July 2018"
+output: html_document
+---
+
+-Read in presence and absence data 
+-Read in the predictors that were used in Script #3 of the Maxent models and stack them
+-Want to compare models - have to conduct the same model with same predictors
+-Combine presence/absence data and extract from raster stack
+
+
+Define variables here: 
+```{r}
+# define your raster temporary folder; this is where the script will store temporary raster files while raster things are happening
+raster_temp_folder <- "E:/SERVIR/Landslide_Models/temp"
+
+# read in the background points and the presence data 
+p_path <- "E:/SERVIR/Landslide_Models/points/landslide_presences.csv"
+a_path <- "E:/SERVIR/Landslide_Models/models/LR/points/landslide_absences.csv"
+# specify the path to save all RData files 
+rdata_path <- "E:/SERVIR/Landslide_Models/models/LR/rdata_files"
+
+# path to save points to
+points_path <- "E:/SERVIR/Landslide_Models/models/LR/points"
+
+# define categorical variable here: 
+# must match name of the raster
+categorical_data <- c("land_cover_tmp")
+```
+
+Libraries you need: 
+```{r}
+library(raster)
+library(sp)
+library(rgdal)
+library(tidyverse)
+library(broom) # for cleaning up statistical objects
+library(readxl)
+library(writexl)
+```
+
+Define raster temporary folder here: 
+```{r}
+# set raster options 
+rasterOptions(tmpdir = raster_temp_folder, progress = "text")
+```
+
+Stacking rasters for the model:
+```{r}
+# define the rasters that compose of the best model 
+var1_path <- "E:/SERVIR/Landslide_Models/predictors_ascii/land_cover_tmp.asc"
+var2_path <- "E:/SERVIR/Landslide_Models/predictors_ascii/dem_tmp.asc"
+var3_path <- "E:/SERVIR/Landslide_Models/predictors_ascii/slope_tmp.asc"
+
+# define as rasters
+land_cover <- raster(var1_path)
+dem <- raster(var2_path)
+slope <- raster(var3_path)
+# .... add more here depending on model
+
+# stack rasters 
+rs <- stack(land_cover, dem, slope)
+#....add more variable names here depending on model
+
+# set projection for the raster stack 
+crs(rs) <- "+proj=utm +zone=47 +datum=WGS84 +units=m +no_defs +ellps=WGS84 +towgs84=0,0,0"
+```
+
+Read in the data and clean up:
+```{r}
+# load presence and absence data
+p <- read_csv(p_path)
+a <- read_csv(a_path) 
+
+# combine presence and absence data for extracting from raster stack
+# add an ID to join with extracted df later on
+pa <- bind_rows(p, a) %>% 
+  tibble::rownames_to_column(var = "ID") %>% 
+  mutate(ID = as.numeric(ID))
+
+# subset out the lat/long only for extracting 
+coords <- pa %>% dplyr::select(-c(ID,Group))
+```
+
+Extract point data from the raster stack:
+```{r}
+# extract points from the raster stack
+# df = TRUE means output is a data frame
+extract_coords_rs <- raster::extract(rs, coords, df = TRUE)
+
+# join back with the presence/absence data
+# remove any NAs
+pa_rs <- extract_coords_rs %>% 
+  full_join(pa) %>% 
+  dplyr::select(-ID) %>% 
+  mutate(Group = if_else(Group == "landslide", 1, 0)) %>%
+  drop_na() 
+
+# make sure categorical variables are factors/characters and NOT numeric
+for (i in categorical_data){
+  #print(i)
+  pa_rs[, c(i)] <- as.factor(pa_rs[, c(i)])
+}
+```
+
+Save everything
+```{r}
+# save the entire workspace
+save(list = ls(all.names = TRUE), 
+     file = paste(rdata_path, "/1_data_prep_workspace.RData", sep = ""),
+     envir = .GlobalEnv)
+
+# save raster stack as an rda file 
+save(rs,
+     file = paste(rdata_path, "/rs.RData", sep = ""))
+
+# write out csv and excel of the point and predictor data as well
+write_csv(pa_rs, paste(points_path, "/landslide_occurrences_with_env.csv",
+                       sep = ""))
+```
